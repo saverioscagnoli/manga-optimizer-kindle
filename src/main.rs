@@ -1,8 +1,14 @@
+mod args;
+
 use std::error::Error;
 use std::fs::File;
 use std::io::BufWriter;
+use std::io::IsTerminal;
 use std::io::Read;
+use std::io::Write;
 use std::io::{self};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use fast_image_resize as fir;
@@ -13,6 +19,12 @@ use image::DynamicImage;
 use image::GrayImage;
 use image::codecs::jpeg::JpegEncoder;
 
+use progress_bar::Color;
+use progress_bar::Style;
+use progress_bar::finalize_progress_bar;
+use progress_bar::inc_progress_bar;
+use progress_bar::init_progress_bar;
+use progress_bar::set_progress_bar_action;
 use rawzip::CompressionMethod;
 use rawzip::FileReader;
 use rawzip::ZipArchive;
@@ -20,6 +32,9 @@ use rawzip::ZipArchiveEntryWayfinder;
 use rawzip::ZipArchiveWriter;
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
+
+use crate::args::Args;
+use crate::args::OutputStyle;
 
 type BoxErr = Box<dyn Error + Send + Sync>;
 
@@ -59,6 +74,7 @@ impl Worker {
         &mut self,
         archive: &ZipArchive<FileReader>,
         wayfinder: ZipArchiveEntryWayfinder,
+        size: (u32, u32),
     ) -> Result<(Vec<u8>, (u32, u32)), BoxErr> {
         let local = archive.get_entry(wayfinder)?;
         let decompressor = DeflateDecoder::new(local.reader());
@@ -69,7 +85,7 @@ impl Worker {
             .read_to_end(&mut self.buf)?;
 
         let img = image::load_from_memory(&self.buf)?;
-        let gray = self.prepare(img, OASIS)?;
+        let gray = self.prepare(img, size)?;
 
         let mut out = Vec::new();
         JpegEncoder::new_with_quality(&mut out, 85).encode_image(&gray)?;
@@ -94,9 +110,10 @@ fn collect_pages(
     Ok(pages)
 }
 
-const OASIS: (u32, u32) = (1264, 1680);
-
 fn main() -> Result<(), BoxErr> {
+    let args = Args::parse()?;
+    let resolution = args.device.resolution();
+
     let file = File::open("examples/Dr. STONE v01.cbz")?;
     let mut archive_buf = vec![0u8; rawzip::RECOMMENDED_BUFFER_SIZE];
     let archive = ZipArchive::from_file(file, &mut archive_buf)?;
@@ -106,6 +123,14 @@ fn main() -> Result<(), BoxErr> {
     let pages = collect_pages(&archive, &mut archive_buf)?;
     let total = pages.len();
 
+    if args.style == OutputStyle::Progress {
+        init_progress_bar(total);
+        set_progress_bar_action("Encoding", Color::Green, Style::Bold);
+    }
+
+    let i = AtomicUsize::new(1);
+    let is_tty = io::stdout().is_terminal();
+
     let encoded: Vec<(&str, Vec<u8>, (u32, u32))> = pages
         .par_iter()
         .map_init(
@@ -113,9 +138,25 @@ fn main() -> Result<(), BoxErr> {
                 buf: Vec::new(),
                 resizer: fir::Resizer::new(),
             },
-            |w, (path, wayfinder)| {
-                w.process_page(&archive, *wayfinder)
-                    .map(|(data, dim)| (path.as_str(), data, dim))
+            |worker, (path, wayfinder)| {
+                let (data, dimensions) = worker.process_page(&archive, *wayfinder, resolution)?;
+
+                match args.style {
+                    OutputStyle::Simple => {
+                        let mut out = io::stdout().lock();
+                        let n = i.fetch_add(1, Ordering::AcqRel);
+                        if is_tty {
+                            write!(out, "\r\x1b[2K[{}/{}]", n, total).ok();
+                            out.flush().ok();
+                        } else {
+                            writeln!(out, "[{}/{}]", n, total).ok();
+                        }
+                    }
+                    OutputStyle::Progress => inc_progress_bar(),
+                    OutputStyle::JSON => {}
+                }
+
+                Ok::<_, BoxErr>((path.as_str(), data, dimensions))
             },
         )
         .collect::<Result<_, _>>()?;
@@ -123,7 +164,7 @@ fn main() -> Result<(), BoxErr> {
     let output_file = File::create("examples/drstonesuperfigo.cbz")?;
     let mut output_archive = ZipArchiveWriter::new(BufWriter::new(output_file));
 
-    for (i, (path, data, (w, h))) in encoded.iter().enumerate() {
+    for (path, data, (w, h)) in encoded.iter() {
         let (mut entry, config) = output_archive
             .new_file(path)
             .compression_method(CompressionMethod::STORE)
@@ -133,12 +174,23 @@ fn main() -> Result<(), BoxErr> {
         io::copy(&mut data.as_slice(), &mut writer)?;
         let (_, descriptor) = writer.finish()?;
         entry.finish(descriptor)?;
-
-        println!("[{}/{}]: {}x{}", i + 1, total, w, h);
     }
 
     output_archive.finish()?;
-    println!("took {:?}", t0.elapsed());
+
+    match args.style {
+        OutputStyle::Simple => {
+            if is_tty {
+                println!()
+            }
+        }
+        OutputStyle::Progress => {
+            finalize_progress_bar();
+        }
+        _ => {}
+    }
+
+    println!("finished in {:?}", t0.elapsed());
 
     Ok(())
 }
