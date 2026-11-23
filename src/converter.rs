@@ -6,6 +6,8 @@ use std::io::Write;
 use std::io::{self};
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use flate2::read::DeflateDecoder;
@@ -167,11 +169,12 @@ impl Converter {
         let mut output_archive = ZipArchiveWriter::new(&mut output);
 
         let output_count = data.iter().map(|(_, views)| views.len()).sum::<usize>();
+        let ext = if self.preserve_color { "jpg" } else { "png" };
         let number_pages = output_count > self.total
             || data.iter().any(|(path, _)| {
                 !Path::new(path)
                     .extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case("jpg"))
+                    .is_some_and(|e| e.eq_ignore_ascii_case(ext))
             });
 
         let digits = output_count.to_string().len();
@@ -181,7 +184,7 @@ impl Converter {
 
         for (index, (source_path, data)) in output_pages.enumerate() {
             let page_path = match number_pages {
-                true => format!("{:0digits$}.jpg", index + 1),
+                true => format!("{:0digits$}.{ext}", index + 1),
                 false => source_path,
             };
 
@@ -212,6 +215,9 @@ impl Converter {
         let pages = self.collect_pages(&archive)?;
         let (images, median_ratio) = Self::collect_images(&archive, &pages)?;
 
+        let count = AtomicUsize::new(1);
+        let total = pages.len();
+
         let encoded: Vec<(String, Vec<Vec<u8>>)> = pages
             .par_iter()
             .zip(images.into_par_iter())
@@ -223,6 +229,7 @@ impl Converter {
                     self.quality,
                     self.preserve_color,
                 )?;
+                println!("[{}/{}]", count.fetch_add(1, Ordering::AcqRel), total);
                 Ok((page_path.clone(), data))
             })
             .collect::<Result<_, BoxedError>>()?;
@@ -234,9 +241,10 @@ impl Converter {
         let start = Instant::now();
 
         for p in self.paths.clone() {
-            let (data, time) = self.process_file(&p)?;
+            let (data, start) = self.process_file(&p)?;
 
             self.write_archive(&p, data)?;
+            println!("took {:?}", start.elapsed());
         }
 
         println!("processed {} entries in {:?}", self.total, start.elapsed());
