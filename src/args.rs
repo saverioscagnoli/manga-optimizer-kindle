@@ -191,6 +191,7 @@ impl Args {
                 Value(path) => args.paths.push(path.parse()?),
                 Short('o') | Long("output") => args.style = parser.value()?.parse()?,
                 Short('d') | Long("device") => args.device = parser.value()?.parse()?,
+                Short('q') | Long("quality") => args.quality = parser.value()?.parse()?,
                 Short('r') | Long("recursive") => args.recursive = true,
                 Short('C') | Long("preserve-color") => args.preserve_color = true,
                 Short('D') | Long("list-devices") => {
