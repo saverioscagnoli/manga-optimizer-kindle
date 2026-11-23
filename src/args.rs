@@ -126,6 +126,7 @@ pub struct Args {
     pub paths: Vec<PathBuf>,
     pub style: OutputStyle,
     pub device: Device,
+    pub recursive: bool,
 }
 
 impl Args {
@@ -144,6 +145,7 @@ impl Args {
         println!("  -d, --device <DEVICE>   target device, will optimize for this");
         println!("                          (default: paperwhite-6-gen-12");
         println!("  -D, --list-devices      list supported device models and their names");
+        println!("  -r, --recursive         recursively process entries in directories.");
         println!("  -h, --help              show this help message");
     }
 
@@ -172,6 +174,7 @@ impl Args {
                 Value(path) => args.paths.push(path.parse()?),
                 Short('o') | Long("output") => args.style = parser.value()?.parse()?,
                 Short('d') | Long("device") => args.device = parser.value()?.parse()?,
+                Short('r') | Long("recursive") => args.recursive = true,
                 Short('D') | Long("list-devices") => {
                     Self::print_device_list();
                     std::process::exit(0);
