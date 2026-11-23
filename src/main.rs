@@ -17,7 +17,6 @@ use std::time::Instant;
 use fast_image_resize as fir;
 use flate2::read::DeflateDecoder;
 use image::DynamicImage;
-use image::GrayImage;
 use image::codecs::jpeg::JpegEncoder;
 use rawzip::CompressionMethod;
 use rawzip::FileReader;
@@ -40,19 +39,25 @@ impl Worker {
         &mut self,
         img: DynamicImage,
         (max_w, max_h): (u32, u32),
-    ) -> Result<GrayImage, fir::ResizeError> {
-        let gray = img.into_luma8();
-        let (w, h) = gray.dimensions();
+        preserve_color: bool,
+    ) -> Result<DynamicImage, fir::ResizeError> {
+        let src = if preserve_color {
+            DynamicImage::ImageRgb8(img.into_rgb8())
+        } else {
+            DynamicImage::ImageLuma8(img.into_luma8())
+        };
+
+        let (w, h) = (src.width(), src.height());
 
         if w <= max_w && h <= max_h {
-            return Ok(gray);
+            return Ok(src);
         }
 
         let scale = (max_w as f64 / w as f64).min(max_h as f64 / h as f64);
         let scaled = |n: u32| ((n as f64 * scale).round() as u32).max(1);
-        let mut dest = GrayImage::new(scaled(w), scaled(h));
+        let mut dest = DynamicImage::new(scaled(w), scaled(h), src.color());
 
-        self.resizer.resize(&gray, &mut dest, None)?;
+        self.resizer.resize(&src, &mut dest, None)?;
         Ok(dest)
     }
 
@@ -61,6 +66,8 @@ impl Worker {
         archive: &ZipArchive<FileReader>,
         wayfinder: ZipArchiveEntryWayfinder,
         resolution: (u32, u32),
+        quality: u8,
+        preserve_color: bool,
     ) -> Result<Vec<u8>, BoxErr> {
         let local = archive.get_entry(wayfinder)?;
         let decompressor = DeflateDecoder::new(local.reader());
@@ -71,10 +78,16 @@ impl Worker {
             .read_to_end(&mut self.buf)?;
 
         let img = image::load_from_memory(&self.buf)?;
-        let gray = self.prepare(img, resolution)?;
-
+        let page = self.prepare(img, resolution, preserve_color)?;
         let mut out = Vec::new();
-        JpegEncoder::new_with_quality(&mut out, 85).encode_image(&gray)?;
+
+        JpegEncoder::new_with_quality(&mut out, quality).encode(
+            page.as_bytes(),
+            page.width(),
+            page.height(),
+            page.color().into(),
+        )?;
+
         Ok(out)
     }
 }
@@ -101,6 +114,8 @@ fn process_file(
     file_total: usize,
     resolution: (u32, u32),
     is_tty: bool,
+    quality: u8,
+    preserve_color: bool,
     archive_buf: &mut [u8],
 ) -> Result<(), BoxErr> {
     let file_started = Instant::now();
@@ -127,7 +142,13 @@ fn process_file(
                 resizer: fir::Resizer::new(),
             },
             |worker, (page_path, wayfinder)| {
-                let data = worker.process_page(&archive, *wayfinder, resolution)?;
+                let data = worker.process_page(
+                    &archive,
+                    *wayfinder,
+                    resolution,
+                    quality,
+                    preserve_color,
+                )?;
                 let mut stdout = io::stdout().lock();
                 let page_num = completed.fetch_add(1, Ordering::Relaxed) + 1;
 
@@ -227,6 +248,8 @@ fn main() -> Result<(), BoxErr> {
             file_total,
             resolution,
             is_tty,
+            args.quality,
+            args.preserve_color,
             &mut archive_buf,
         )?;
     }

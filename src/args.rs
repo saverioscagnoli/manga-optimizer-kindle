@@ -120,13 +120,27 @@ impl FromStr for Device {
     }
 }
 
-#[derive(Default)]
 #[derive(Debug, Clone)]
 pub struct Args {
     pub paths: Vec<PathBuf>,
     pub style: OutputStyle,
     pub device: Device,
+    pub quality: u8,
     pub recursive: bool,
+    pub preserve_color: bool,
+}
+
+impl Default for Args {
+    fn default() -> Self {
+        Self {
+            paths: Vec::default(),
+            style: OutputStyle::default(),
+            device: Device::default(),
+            quality: 85,
+            recursive: false,
+            preserve_color: false,
+        }
+    }
 }
 
 impl Args {
@@ -137,7 +151,7 @@ impl Args {
     fn print_help() {
         Self::print_usage();
         println!();
-        println!("optimizes .cbz, .pdf, .mobi, .av3 file(s) for the selected ereader.");
+        println!("optimizes .cbz file(s) for the selected ereader.");
         println!();
         println!("options:");
         println!("  -s, --style <STYLE>     progress display: simple, progress, json");
@@ -145,7 +159,10 @@ impl Args {
         println!("  -d, --device <DEVICE>   target device, will optimize for this");
         println!("                          (default: paperwhite-6-gen-12");
         println!("  -D, --list-devices      list supported device models and their names");
-        println!("  -r, --recursive         recursively process entries in directories.");
+        println!("  -q, --quality           the quality selected for encoding the new images");
+        println!("                          (default: 85) (1-256)");
+        println!("  -r, --recursive         recursively process entries in directories");
+        println!("  -C, --preserve-color    doesn't convert the files into grayscale");
         println!("  -h, --help              show this help message");
     }
 
@@ -175,6 +192,7 @@ impl Args {
                 Short('o') | Long("output") => args.style = parser.value()?.parse()?,
                 Short('d') | Long("device") => args.device = parser.value()?.parse()?,
                 Short('r') | Long("recursive") => args.recursive = true,
+                Short('C') | Long("preserve-color") => args.preserve_color = true,
                 Short('D') | Long("list-devices") => {
                     Self::print_device_list();
                     std::process::exit(0);
