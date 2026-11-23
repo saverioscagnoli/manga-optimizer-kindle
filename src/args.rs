@@ -159,8 +159,8 @@ impl Args {
         println!("  -d, --device <DEVICE>   target device, will optimize for this");
         println!("                          (default: paperwhite-6-gen-12");
         println!("  -D, --list-devices      list supported device models and their names");
-        println!("  -q, --quality           the quality selected for encoding the new images");
-        println!("                          (default: 85) (1-256)");
+        println!("  -q, --quality           JPEG quality when preserving color");
+        println!("                          (default: 85) (1-100)");
         println!("  -r, --recursive         recursively process entries in directories");
         println!("  -C, --preserve-color    doesn't convert the files into grayscale");
         println!("  -h, --help              show this help message");

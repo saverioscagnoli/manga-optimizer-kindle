@@ -1,5 +1,5 @@
 [package]
-name = "kcc2"
+name = "efit"
 version = "0.1.0"
 edition = "2024"
 
@@ -9,6 +9,6 @@ flate2 = "1.1.11"
 image = { version = "0.25.10", features = ["webp", "png", "jpeg"], default-features = false }
 lexopt = "0.3.2"
 natord = "1.0.9"
-progress_bar = "1.6.0"
+png = "0.18.1"
 rawzip = "0.5.2"
 rayon = "1.12.0"

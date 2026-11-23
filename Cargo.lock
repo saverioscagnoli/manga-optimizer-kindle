@@ -82,6 +82,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "efit"
+version = "0.1.0"
+dependencies = [
+ "fast_image_resize",
+ "flate2",
+ "image",
+ "lexopt",
+ "natord",
+ "png",
+ "rawzip",
+ "rayon",
+]
+
+[[package]]
 name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -145,20 +159,6 @@ checksum = "525e9ff3e1a4be2fbea1fdf0e98686a6d98b4d8f937e1bf7402245af1909e8c3"
 dependencies = [
  "byteorder-lite",
  "quick-error",
-]
-
-[[package]]
-name = "kcc2"
-version = "0.1.0"
-dependencies = [
- "fast_image_resize",
- "flate2",
- "image",
- "lexopt",
- "natord",
- "progress_bar",
- "rawzip",
- "rayon",
 ]
 
 [[package]]
@@ -239,12 +239,6 @@ checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
 ]
-
-[[package]]
-name = "progress_bar"
-version = "1.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "098dbcd415adc57855f301cecc1cce9cfa93f0dba3d2998757a278b623eacb64"
 
 [[package]]
 name = "pxfm"
