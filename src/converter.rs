@@ -23,7 +23,9 @@ use rayon::iter::ParallelIterator;
 use crate::BoxedError;
 use crate::args::Args;
 use crate::args::Options;
-use crate::bar::draw_bar;
+use crate::args::OutputStyle;
+use crate::output::draw_bar;
+use crate::output::json_string;
 use crate::worker::DecodeWorker;
 
 struct Page {
@@ -266,9 +268,18 @@ impl Converter {
                     let data = worker.process_page(img, self.resolution, median_ratio)?;
 
                     let done = count.fetch_add(1, Ordering::AcqRel);
-                    if self.is_tty {
-                        draw_bar(done, total, &name);
-                    }
+
+                    match self.options.style {
+                        OutputStyle::Progress => {
+                            if self.is_tty {
+                                draw_bar(done, total, &name)
+                            }
+                        }
+                        OutputStyle::JSON => {
+                            let path = json_string(&format!("{}", path.display()));
+                            println!(r#"{{"input": {path}, "page": {done}, "total": {total}}}"#);
+                        }
+                    };
 
                     Ok((page.path.clone(), data))
                 },
@@ -281,12 +292,21 @@ impl Converter {
     pub fn start(&mut self) -> Result<(), BoxedError> {
         let started = Instant::now();
 
-        for p in self.paths.clone() {
+        for (i, p) in self.paths.clone().iter().enumerate() {
+            let n = i + 1;
             let (data, started1) = self.process_file(&p)?;
 
             self.write_archive(&p, data)?;
 
-            eprintln!("  {:.2?}", started1.elapsed());
+            match self.options.style {
+                OutputStyle::Progress => {
+                    eprintln!("  {:.2?}", started1.elapsed())
+                }
+                OutputStyle::JSON => println!(
+                    r#"{{"books_processed": {n}, "elapsed": "{:?}"}}"#,
+                    started.elapsed()
+                ),
+            }
         }
 
         println!(

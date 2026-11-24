@@ -1,6 +1,6 @@
 mod args;
-mod bar;
 mod converter;
+mod output;
 mod worker;
 
 use std::error::Error;

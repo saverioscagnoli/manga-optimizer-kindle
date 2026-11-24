@@ -163,8 +163,8 @@ impl Args {
         println!("optimizes .cbz file(s) for the selected ereader.");
         println!();
         println!("options:");
-        println!("  -s, --style <STYLE>     progress display: simple, progress, json");
-        println!("                          (default: simple)");
+        println!("  -s, --style <STYLE>     progress display: progress, json");
+        println!("                          (default: progress)");
         println!("  -d, --device <DEVICE>   target device, will optimize for this");
         println!("                          (default: paperwhite-6-gen-12)");
         println!("  -D, --list-devices      list supported device models and their names");
