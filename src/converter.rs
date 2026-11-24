@@ -136,7 +136,16 @@ impl Converter {
         let mut pages = Vec::new();
 
         while let Some(entry) = entries.next_entry()? {
+            if entry.is_dir() {
+                continue;
+            }
+
             let path = entry.file_path().try_normalize()?.as_str().to_owned();
+
+            if !image::ImageFormat::from_path(&path).is_ok_and(|format| format.reading_enabled()) {
+                continue;
+            }
+
             pages.push(Page {
                 path,
                 wayfinder: entry.wayfinder(),
