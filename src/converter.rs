@@ -11,36 +11,57 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use flate2::read::DeflateDecoder;
-use image::DynamicImage;
-use image::GenericImageView;
+use image::ImageReader;
 use rawzip::CompressionMethod;
 use rawzip::FileReader;
 use rawzip::ZipArchive;
 use rawzip::ZipArchiveEntryWayfinder;
 use rawzip::ZipArchiveWriter;
-use rayon::iter::IndexedParallelIterator;
-use rayon::iter::IntoParallelIterator;
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
 
 use crate::BoxedError;
 use crate::args::Args;
+use crate::args::Options;
+use crate::bar::draw_bar;
 use crate::worker::DecodeWorker;
+
+struct Page {
+    path: String,
+    wayfinder: ZipArchiveEntryWayfinder,
+    compression: CompressionMethod,
+}
+
+impl Page {
+    fn reader<'a>(
+        &self,
+        archive: &'a ZipArchive<FileReader>,
+    ) -> Result<impl Read + 'a, BoxedError> {
+        let entry = archive.get_entry(self.wayfinder)?;
+        let raw = entry.reader();
+        let decoded: Box<dyn Read + 'a> = match self.compression {
+            CompressionMethod::STORE => Box::new(raw),
+            CompressionMethod::DEFLATE => Box::new(DeflateDecoder::new(raw)),
+            method => {
+                return Err(
+                    format!("unsupported ZIP compression {method} for {}", self.path).into(),
+                );
+            }
+        };
+        Ok(entry.verifying_reader(decoded))
+    }
+}
 
 pub struct Converter {
     // State
     archive_buffer: Vec<u8>,
     paths: Vec<PathBuf>,
+    options: Options,
 
     // Computed
     resolution: (u32, u32),
     is_tty: bool,
     total: usize,
-
-    // Options
-    quality: u8,
-    recursive: bool,
-    preserve_color: bool,
 }
 
 impl Converter {
@@ -50,12 +71,10 @@ impl Converter {
         Self {
             archive_buffer: vec![0; rawzip::RECOMMENDED_BUFFER_SIZE],
             paths: args.paths,
-            resolution: args.device.resolution(),
+            resolution: args.options.device.resolution(),
             is_tty: io::stdout().is_terminal(),
             total,
-            quality: args.quality,
-            recursive: args.recursive,
-            preserve_color: args.preserve_color,
+            options: args.options,
         }
     }
 
@@ -67,7 +86,7 @@ impl Converter {
             return Ok(());
         }
 
-        if path.is_dir() && (depth == 0 || self.recursive) {
+        if path.is_dir() && (depth == 0 || self.options.recursive) {
             for entry in fs::read_dir(path)? {
                 let entry = entry?;
                 self.collect_paths(out, entry.path(), depth + 1)?;
@@ -112,46 +131,22 @@ impl Converter {
         }
     }
 
-    fn collect_pages(
-        &mut self,
-        archive: &ZipArchive<FileReader>,
-    ) -> Result<Vec<(String, ZipArchiveEntryWayfinder)>, BoxedError> {
+    fn collect_pages(&mut self, archive: &ZipArchive<FileReader>) -> Result<Vec<Page>, BoxedError> {
         let mut entries = archive.entries(&mut self.archive_buffer);
         let mut pages = Vec::new();
 
         while let Some(entry) = entries.next_entry()? {
             let path = entry.file_path().try_normalize()?.as_str().to_owned();
-            pages.push((path, entry.wayfinder()));
+            pages.push(Page {
+                path,
+                wayfinder: entry.wayfinder(),
+                compression: entry.compression_method(),
+            });
         }
 
-        pages.sort_by(|a, b| natord::compare(&a.0, &b.0));
+        pages.sort_by(|a, b| natord::compare(&a.path, &b.path));
 
         Ok(pages)
-    }
-
-    /// Decodes images in parallel and spits out the median portrait ratio,
-    /// used for recognizing page spreads
-    fn collect_images(
-        archive: &ZipArchive<FileReader>,
-        pages: &[(String, ZipArchiveEntryWayfinder)],
-    ) -> Result<(Vec<DynamicImage>, Option<f64>), BoxedError> {
-        let (images, sizes) = pages
-            .par_iter()
-            .map_init(Vec::<u8>::new, |buffer, (_, wayfinder)| {
-                buffer.clear();
-
-                let entry = archive.get_entry(*wayfinder)?;
-                let decoder = DeflateDecoder::new(entry.reader());
-                entry.verifying_reader(decoder).read_to_end(buffer)?;
-
-                let img = image::load_from_memory(buffer)?;
-                let size = img.dimensions();
-                Ok((img, size))
-            })
-            .collect::<Result<(Vec<_>, Vec<_>), BoxedError>>()?;
-
-        let ratio = Self::median_portrait_ratio(&sizes);
-        Ok((images, ratio))
     }
 
     fn write_archive(
@@ -169,7 +164,11 @@ impl Converter {
         let mut output_archive = ZipArchiveWriter::new(&mut output);
 
         let output_count = data.iter().map(|(_, views)| views.len()).sum::<usize>();
-        let ext = if self.preserve_color { "jpg" } else { "png" };
+        let ext = if self.options.preserve_color {
+            "jpg"
+        } else {
+            "png"
+        };
         let number_pages = output_count > self.total
             || data.iter().any(|(path, _)| {
                 !Path::new(path)
@@ -213,41 +212,79 @@ impl Converter {
         let file = File::open(path)?;
         let archive = ZipArchive::from_file(file, &mut self.archive_buffer)?;
         let pages = self.collect_pages(&archive)?;
-        let (images, median_ratio) = Self::collect_images(&archive, &pages)?;
+        let name = path
+            .file_name()
+            .unwrap_or(path.as_os_str())
+            .to_string_lossy();
 
         let count = AtomicUsize::new(1);
         let total = pages.len();
 
-        let encoded: Vec<(String, Vec<Vec<u8>>)> = pages
+        let sizes = pages
             .par_iter()
-            .zip(images.into_par_iter())
-            .map_init(DecodeWorker::default, |worker, ((page_path, _), img)| {
-                let data = worker.process_page(
-                    img,
-                    self.resolution,
-                    median_ratio,
-                    self.quality,
-                    self.preserve_color,
-                )?;
-                println!("[{}/{}]", count.fetch_add(1, Ordering::AcqRel), total);
-                Ok((page_path.clone(), data))
+            .map_init(Vec::new, |buf, page| {
+                let mut reader = page.reader(&archive)?;
+
+                buf.clear();
+
+                (&mut reader).take(8192).read_to_end(buf)?;
+                let dimensions = |bytes: &[u8]| -> Result<_, BoxedError> {
+                    Ok(ImageReader::new(io::Cursor::new(bytes))
+                        .with_guessed_format()?
+                        .into_dimensions()?)
+                };
+
+                if let Ok(size) = dimensions(buf) {
+                    return Ok(size);
+                }
+
+                // Some image headers extend beyond the initial prefix
+                reader.read_to_end(buf)?;
+                dimensions(buf)
             })
-            .collect::<Result<_, BoxedError>>()?;
+            .collect::<Result<Vec<_>, BoxedError>>()?;
+
+        let median_ratio = Self::median_portrait_ratio(&sizes);
+
+        let encoded = pages
+            .par_iter()
+            .map_init(
+                || (DecodeWorker::new(self.options), Vec::new()),
+                |(worker, buf), page| {
+                    buf.clear();
+                    page.reader(&archive)?.read_to_end(buf)?;
+                    let img = image::load_from_memory(buf)?;
+                    let data = worker.process_page(img, self.resolution, median_ratio)?;
+
+                    let done = count.fetch_add(1, Ordering::AcqRel);
+                    if self.is_tty {
+                        draw_bar(done, total, &name);
+                    }
+
+                    Ok((page.path.clone(), data))
+                },
+            )
+            .collect::<Result<Vec<_>, BoxedError>>()?;
 
         Ok((encoded, t0))
     }
 
     pub fn start(&mut self) -> Result<(), BoxedError> {
-        let start = Instant::now();
+        let started = Instant::now();
 
         for p in self.paths.clone() {
-            let (data, start) = self.process_file(&p)?;
+            let (data, started1) = self.process_file(&p)?;
 
             self.write_archive(&p, data)?;
-            println!("took {:?}", start.elapsed());
+
+            eprintln!("  {:.2?}", started1.elapsed());
         }
 
-        println!("processed {} entries in {:?}", self.total, start.elapsed());
+        println!(
+            "processed {} entries in {:.2?}",
+            self.total,
+            started.elapsed()
+        );
 
         Ok(())
     }

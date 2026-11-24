@@ -2,46 +2,99 @@ use fast_image_resize as fir;
 use image::DynamicImage;
 use image::GenericImageView;
 use image::GrayImage;
-use image::Luma;
 use image::codecs::jpeg::JpegEncoder;
-use image::imageops::ColorMap;
-use image::imageops::dither;
 
 use crate::BoxedError;
+use crate::args::Options;
 
-struct Gray16;
+const GRAY_DIFFUSION: [(u8, i8, i8, i8); 256] = {
+    let mut table = [(0, 0, 0, 0); 256];
+    let mut i = 0;
 
-impl ColorMap for Gray16 {
-    type Color = Luma<u8>;
+    while i < 256 {
+        let gray = ((i + 8) / 17) * 17;
+        let error = i as i16 - gray as i16;
 
-    fn index_of(&self, color: &Self::Color) -> usize {
-        (usize::from(color[0]) + 8) / 17
+        table[i] = (
+            gray as u8,
+            (error * 7 / 16) as i8,
+            (error * 3 / 16) as i8,
+            (error * 5 / 16) as i8,
+        );
+
+        i += 1;
     }
 
-    fn map_color(&self, color: &mut Self::Color) {
-        color[0] = (self.index_of(color) * 17) as u8
+    table
+};
+
+fn dither_gray(page: &mut GrayImage) {
+    let width = page.width() as usize;
+    let mut rows = page.as_mut().chunks_exact_mut(width);
+    let Some(mut row) = rows.next() else { return };
+
+    for next in rows {
+        let mut right = 0;
+        let mut left_below: Option<&mut u8> = None;
+
+        for (pixel, below) in row.iter_mut().zip(&mut *next) {
+            let (gray, east, southwest, south) =
+                GRAY_DIFFUSION[pixel.saturating_add_signed(right) as usize];
+            *pixel = gray;
+            right = east;
+
+            if let Some(left) = left_below {
+                *left = left.saturating_add_signed(southwest);
+            }
+
+            *below = below.saturating_add_signed(south);
+            left_below = Some(below);
+        }
+
+        row = next;
+    }
+
+    let mut right = 0;
+
+    for pixel in row {
+        let (gray, east, ..) = GRAY_DIFFUSION[pixel.saturating_add_signed(right) as usize];
+        *pixel = gray;
+        right = east;
     }
 }
 
-#[derive(Default)]
 pub struct DecodeWorker {
-    buffer: Vec<u8>,
     resizer: fir::Resizer,
+    options: Options,
 }
 
 impl DecodeWorker {
+    pub fn new(options: Options) -> Self {
+        Self {
+            resizer: fir::Resizer::default(),
+            options,
+        }
+    }
+
     fn encode_gray_png(page: &GrayImage) -> Result<Vec<u8>, BoxedError> {
         let palette: Vec<u8> = (0u8..16).flat_map(|level| [level * 17; 3]).collect();
 
         let width = page.width() as usize;
-        let mut packed = Vec::with_capacity(width.div_ceil(2) * page.height() as usize);
-        let index = |gray: u8| ((u16::from(gray) + 8) / 17) as u8;
-
-        for row in page.as_raw().chunks_exact(width) {
-            for pair in row.chunks(2) {
-                let high = index(pair[0]);
-                let low = pair.get(1).copied().map_or(0, index);
-                packed.push((high << 4) | low);
+        let stride = width.div_ceil(2);
+        let mut packed = vec![0; stride * page.height() as usize];
+        for (row, dest) in page
+            .as_raw()
+            .chunks_exact(width)
+            .zip(packed.chunks_exact_mut(stride))
+        {
+            // Dithering maps each pixel to 0x00, 0x11, ..., 0xff.
+            let mut pairs = row.chunks_exact(2);
+            for (byte, pair) in dest.iter_mut().zip(&mut pairs) {
+                *byte = (pair[0] & 0xf0) | (pair[1] >> 4);
+            }
+            if let [last] = pairs.remainder() {
+                // This also quantizes single-column pages, which skip dithering.
+                dest[stride - 1] = (((u16::from(*last) + 8) / 17) as u8) << 4;
             }
         }
 
@@ -66,9 +119,8 @@ impl DecodeWorker {
         &mut self,
         img: DynamicImage,
         (max_w, max_h): (u32, u32),
-        preserve_color: bool,
     ) -> Result<DynamicImage, fir::ResizeError> {
-        let src = match preserve_color {
+        let src = match self.options.preserve_color {
             true => DynamicImage::ImageRgb8(img.into_rgb8()),
             false => DynamicImage::ImageLuma8(img.into_luma8()),
         };
@@ -87,18 +139,12 @@ impl DecodeWorker {
         Ok(dest)
     }
 
-    fn encode(
-        &mut self,
-        img: DynamicImage,
-        target: (u32, u32),
-        quality: u8,
-        preserve_color: bool,
-    ) -> Result<Vec<u8>, BoxedError> {
-        let mut page = self.resize(img, target, preserve_color)?;
+    fn encode(&mut self, img: DynamicImage, target: (u32, u32)) -> Result<Vec<u8>, BoxedError> {
+        let mut page = self.resize(img, target)?;
 
         if let DynamicImage::ImageLuma8(gray) = &mut page {
             if gray.width() >= 2 && gray.height() >= 1 {
-                dither(gray, &Gray16);
+                dither_gray(gray);
             }
 
             return Self::encode_gray_png(gray);
@@ -106,7 +152,7 @@ impl DecodeWorker {
 
         let mut out: Vec<u8> = Vec::new();
 
-        JpegEncoder::new_with_quality(&mut out, quality).encode(
+        JpegEncoder::new_with_quality(&mut out, self.options.quality).encode(
             page.as_bytes(),
             page.width(),
             page.height(),
@@ -121,28 +167,43 @@ impl DecodeWorker {
         img: DynamicImage,
         target: (u32, u32),
         median_portrait_ratio: Option<f64>,
-        quality: u8,
-        preserve_color: bool,
     ) -> Result<Vec<Vec<u8>>, BoxedError> {
+        let mut out = Vec::new();
         let ratio = img.width() as f64 / img.height() as f64;
         let is_spread = match median_portrait_ratio {
             Some(m) => ratio > 1.0 && (ratio / (2.0 * m) - 1.0).abs() <= 0.15,
             None => false,
         };
 
-        let mut enc = |v| self.encode(v, target, quality, preserve_color);
+        let ss = self.options.split_spreads;
+        let rs = self.options.rotate_spreads;
+        let mut enc = |v| self.encode(v, target);
 
         if is_spread {
-            let (width, height) = img.dimensions();
-            let mid = width / 2;
+            let mut one_selected = false;
 
-            return Ok(vec![
-                enc(img.crop_imm(mid, 0, width - mid, height))?,
-                enc(img.crop_imm(0, 0, mid, height))?,
-                enc(img.rotate90())?,
-            ]);
+            if ss {
+                let (width, height) = img.dimensions();
+                let mid = width / 2;
+
+                out.push(enc(img.crop_imm(mid, 0, width - mid, height))?);
+                out.push(enc(img.crop_imm(0, 0, mid, height))?);
+                one_selected = true;
+            }
+
+            if rs {
+                out.push(enc(img.rotate90())?);
+                one_selected = true;
+            }
+
+            if !one_selected {
+                out.push(enc(img)?);
+            }
+
+            return Ok(out);
+        } else {
+            out.push(enc(img)?);
+            return Ok(out);
         }
-
-        Ok(vec![enc(img)?])
     }
 }

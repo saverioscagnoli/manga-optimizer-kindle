@@ -1,4 +1,5 @@
 mod args;
+mod bar;
 mod converter;
 mod worker;
 

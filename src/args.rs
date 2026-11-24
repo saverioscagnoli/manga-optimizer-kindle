@@ -1,11 +1,12 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
+const BIN: &str = env!("CARGO_BIN_NAME");
+
 #[derive(Default)]
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub enum OutputStyle {
     #[default]
-    Simple,
     Progress,
     JSON,
 }
@@ -15,7 +16,6 @@ impl FromStr for OutputStyle {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "simple" => Ok(Self::Simple),
             "progress" => Ok(Self::Progress),
             "json" => Ok(Self::JSON),
             o => Err(format!("invalid output: {}", o)),
@@ -120,32 +120,41 @@ impl FromStr for Device {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Args {
-    pub paths: Vec<PathBuf>,
+#[derive(Debug, Clone, Copy)]
+pub struct Options {
     pub style: OutputStyle,
     pub device: Device,
     pub quality: u8,
+    pub split_spreads: bool,
+    pub rotate_spreads: bool,
     pub recursive: bool,
     pub preserve_color: bool,
 }
 
-impl Default for Args {
+impl Default for Options {
     fn default() -> Self {
         Self {
-            paths: Vec::default(),
             style: OutputStyle::default(),
             device: Device::default(),
             quality: 85,
+            split_spreads: false,
+            rotate_spreads: false,
             recursive: false,
             preserve_color: false,
         }
     }
 }
 
+#[derive(Default)]
+#[derive(Debug, Clone)]
+pub struct Args {
+    pub paths: Vec<PathBuf>,
+    pub options: Options,
+}
+
 impl Args {
     fn print_usage() {
-        println!("usage: kcc2 [OPTIONS] <PATH>...");
+        println!("usage: {BIN} [OPTIONS] <PATH>...");
     }
 
     fn print_help() {
@@ -157,10 +166,12 @@ impl Args {
         println!("  -s, --style <STYLE>     progress display: simple, progress, json");
         println!("                          (default: simple)");
         println!("  -d, --device <DEVICE>   target device, will optimize for this");
-        println!("                          (default: paperwhite-6-gen-12");
+        println!("                          (default: paperwhite-6-gen-12)");
         println!("  -D, --list-devices      list supported device models and their names");
-        println!("  -q, --quality           JPEG quality when preserving color");
+        println!("  -q, --quality <QUALITY> JPEG quality when preserving color");
         println!("                          (default: 85) (1-100)");
+        println!("  -S, --split-spreads     splits two-page spreads into two separate pages");
+        println!("  -R, --rotate-spreads    rotates two-page spreads by 90 degrees");
         println!("  -r, --recursive         recursively process entries in directories");
         println!("  -C, --preserve-color    doesn't convert the files into grayscale");
         println!("  -h, --help              show this help message");
@@ -183,17 +194,18 @@ impl Args {
 
         while let Some(arg) = parser.next()? {
             match arg {
-                #[rustfmt::skip]
                 Short('h') | Long("help") => {
                     Self::print_help();
                     std::process::exit(0);
                 }
                 Value(path) => args.paths.push(path.parse()?),
-                Short('o') | Long("output") => args.style = parser.value()?.parse()?,
-                Short('d') | Long("device") => args.device = parser.value()?.parse()?,
-                Short('q') | Long("quality") => args.quality = parser.value()?.parse()?,
-                Short('r') | Long("recursive") => args.recursive = true,
-                Short('C') | Long("preserve-color") => args.preserve_color = true,
+                Short('s') | Long("style") => args.options.style = parser.value()?.parse()?,
+                Short('d') | Long("device") => args.options.device = parser.value()?.parse()?,
+                Short('q') | Long("quality") => args.options.quality = parser.value()?.parse()?,
+                Short('S') | Long("split-spreads") => args.options.split_spreads = true,
+                Short('R') | Long("rotate-spreads") => args.options.rotate_spreads = true,
+                Short('r') | Long("recursive") => args.options.recursive = true,
+                Short('C') | Long("preserve-color") => args.options.preserve_color = true,
                 Short('D') | Long("list-devices") => {
                     Self::print_device_list();
                     std::process::exit(0);
@@ -203,9 +215,8 @@ impl Args {
         }
 
         if args.paths.is_empty() {
-            println!("missing <path>, you must point to a file or to a directory,");
-            println!("where all files will be processed.");
-            println!("use kcc2 --help for additional info.");
+            println!("missing <path>, you must point to a file or to a directory.");
+            println!("use {BIN} --help for additional info.");
             Self::print_usage();
             std::process::exit(1);
         }
